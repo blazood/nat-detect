@@ -46,8 +46,8 @@ pub async fn main(){
     match nat_detect_with_servers(stun_servers.as_slice()).await {
         Ok(r) => {
             println!("{}","#".repeat(32));
-            println!(" nat_type: {:?}", r.0);
-            println!("public_ip: {}", r.1.ip());
+            println!("   nat_type: {:?}", r.0);
+            println!("public_addr: {}", r.1);
         }
         Err(_) => {
             println!("can not detect!");

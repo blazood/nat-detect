@@ -1,6 +1,6 @@
 [package]
 name = "nat-detect"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 authors = ["blazh <blazh@163.com>"]
 keywords = ["nat", "stun", "detect"]
