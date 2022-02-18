@@ -11,7 +11,7 @@ use stun::agent::TransactionId;
 use stun::attributes::{ATTR_CHANGE_REQUEST, ATTR_CHANGED_ADDRESS, ATTR_MAPPED_ADDRESS, AttrType, RawAttribute};
 use stun::Error;
 use stun::message::{CLASS_ERROR_RESPONSE, Message, MessageClass, MessageType, METHOD_BINDING};
-use crate::NatType::{FullCone, OpenInternet, PortRestrictedCone, RestrictedCone, Symmetric, SymmetricUdpFirewall};
+use crate::NatType::{FullCone, OpenInternet, PortRestrictedCone, RestrictedCone, Symmetric, SymmetricUdpFirewall, Unknown};
 
 
 type IoResult<T>= std::io::Result<T>;
@@ -344,8 +344,7 @@ pub async fn nat_detect(local_address: SocketAddr,stun_server: &str) -> IoResult
             ).await;
             debug!("[{}] test12: {}", stun_server,result.is_ok());
             if result.is_err() {
-                debug!("[{}] test12 response error!", stun_server);
-                return other_error();
+                return IoResult::Ok((stun_server.to_string(),Unknown));
             } else {
                 // Symmetric NAT
                 let test12_response: Message = result.unwrap();
