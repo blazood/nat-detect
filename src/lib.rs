@@ -10,7 +10,7 @@ use stun::addr::MappedAddress;
 use stun::agent::TransactionId;
 use stun::attributes::{ATTR_CHANGE_REQUEST, ATTR_CHANGED_ADDRESS, ATTR_MAPPED_ADDRESS, AttrType, RawAttribute};
 use stun::Error;
-use stun::message::{Message, MessageClass, MessageType, METHOD_BINDING};
+use stun::message::{CLASS_ERROR_RESPONSE, Message, MessageClass, MessageType, METHOD_BINDING};
 use crate::NatType::{FullCone, OpenInternet, PortRestrictedCone, RestrictedCone, Symmetric, SymmetricUdpFirewall};
 
 
@@ -435,6 +435,10 @@ async fn single_send(stun_server: &str, mut message: Message, socket: & mut UdpS
         let mut result_message = Message::new();
         result_message.raw = (&buf[0..len]).to_vec();
         if result_message.decode().is_err() {
+            // FIXME
+            break
+        }
+        if result_message.typ.class == CLASS_ERROR_RESPONSE {
             // FIXME
             break
         }
