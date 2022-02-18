@@ -1,0 +1,20 @@
+[package]
+name = "nat-detect"
+version = "0.1.0"
+edition = "2021"
+authors = ["blazh <blazh@163.com>"]
+keywords = ["nat", "stun", "detect"]
+readme = "README.md"
+license = "MIT"
+description = "a simple nat detect implementation for rust"
+repository = "https://github.com/blazood/nat-detect"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+tokio = { version = "1.17", features = ["full"] }
+stun = "0.4"
+log = "0.4"
+simple_logger = "2.1"
+clap = { version = "3.1", features = ["derive"] }
+rand = "0.8.5"
