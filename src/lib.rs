@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::io::{ErrorKind};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use tokio::net::UdpSocket;
 use std::time::Duration;
 
@@ -27,14 +27,57 @@ pub const STUN_RETRY_COUNT: usize = 2;
 
 #[derive(Debug, Eq, PartialEq, Hash, Clone, Copy)]
 pub enum NatType{
+
+    /// UDP is always blocked.
     UdpBlocked,
+
+    /// No NAT, public IP, no firewall.
     OpenInternet,
+
+    /// No NAT, public IP, but symmetric UDP firewall.
     SymmetricUdpFirewall,
+
+    /// A full cone NAT is one where all requests from the same internal IP address and port are
+    /// mapped to the same external IP address and port. Furthermore, any external host can send
+    /// a packet to the internal host, by sending a packet to the mapped external address.
     FullCone,
+
+    /// A restricted cone NAT is one where all requests from the same internal IP address and
+    /// port are mapped to the same external IP address and port. Unlike a full cone NAT, an external
+    /// host (with IP address X) can send a packet to the internal host only if the internal host
+    /// had previously sent a packet to IP address X.
     RestrictedCone,
+
+    /// A port restricted cone NAT is like a restricted cone NAT, but the restriction
+    /// includes port numbers. Specifically, an external host can send a packet, with source IP
+    /// address X and source port P, to the internal host only if the internal host had previously
+    /// sent a packet to IP address X and port P.
     PortRestrictedCone,
+
+    /// A symmetric NAT is one where all requests from the same internal IP address and port,
+    /// to a specific destination IP address and port, are mapped to the same external IP address and
+    /// port.  If the same host sends a packet with the same source address and port, but to
+    /// a different destination, a different mapping is used. Furthermore, only the external host that
+    /// receives a packet can send a UDP packet back to the internal host.
     Symmetric,
+
+    /// Unknown
     Unknown
+}
+
+impl NatType{
+    pub fn weight(&self) -> usize{
+        match self {
+            NatType::UdpBlocked => 1,
+            OpenInternet => 7,
+            SymmetricUdpFirewall => 2,
+            FullCone => 6,
+            RestrictedCone => 5,
+            PortRestrictedCone => 4,
+            Symmetric => 3,
+            NatType::Unknown => 0,
+        }
+    }
 }
 
 
@@ -96,11 +139,16 @@ pub async fn nat_detect_with_servers(stun_server_list: &[&str]) -> IoResult<NatT
 
     let mut reduce_map: HashMap<NatType, usize> = HashMap::new();
     let mut handlers = Vec::new();
+
+    let local_address = local_ip().await?;
+    debug!("local ip: {}", local_address.ip());
+
     for s in stun_server_list {
         info!("{} use", s);
         let stun_server = s.to_string();
+        let local_address_clone = local_address.clone();
         handlers.push( tokio::spawn(async move {
-            nat_detect(&stun_server).await
+            nat_detect(local_address_clone, &stun_server).await
         }));
     }
 
@@ -117,7 +165,13 @@ pub async fn nat_detect_with_servers(stun_server_list: &[&str]) -> IoResult<NatT
         // }
     }
 
-    if let Option::Some((n, _)) = reduce_map.iter().max_by(|v1, v2| v1.1.cmp(v2.1)){
+    // select maximum count
+    // if let Option::Some((n, _)) = reduce_map.iter().max_by(|v1, v2| v1.1.cmp(v2.1)){
+    //     return IoResult::Ok(*n);
+    // }
+
+    // select maximum weight
+    if let Option::Some(n) = reduce_map.keys().max_by(|k1, k2| k1.weight().cmp(&k2.weight())){
         return IoResult::Ok(*n);
     }
 
@@ -151,6 +205,12 @@ impl fmt::Display for ChangedAddress {
             write!(f, "[{}]:{}", self.ip, self.port)
         }
     }
+}
+
+pub async fn local_ip() -> IoResult<SocketAddr> {
+    let socket = UdpSocket::bind("0.0.0.0:0").await?;
+    let _ = socket.connect("8.8.8.8:80").await?;
+    socket.local_addr()
 }
 
 impl ChangedAddress {
@@ -205,10 +265,10 @@ impl ChangedAddress {
 }
 
 
-pub async fn nat_detect(stun_server: &str) -> IoResult<(String, NatType)> {
+pub async fn nat_detect(local_address: SocketAddr,stun_server: &str) -> IoResult<(String, NatType)> {
     let transaction_id = TransactionId::new();
 
-    let mut socket = tokio::net::UdpSocket::bind("0.0.0.0:0").await?;
+    let mut socket = tokio::net::UdpSocket::bind(format!("{}:0", local_address.ip())).await?;
     let mut_socket_ref = &mut socket;
 
     // test1
@@ -219,12 +279,14 @@ pub async fn nat_detect(stun_server: &str) -> IoResult<(String, NatType)> {
             length: 4
         }
     );
+    debug!("[{}] test1 send: {}", stun_server, test1_message);
     let result = single_send(stun_server, test1_message, mut_socket_ref).await;
     debug!("[{}] test1: {}", stun_server, result.is_ok());
     if result.is_err() {
         return IoResult::Ok((stun_server.to_string(),NatType::UdpBlocked));
     }
     let test1_response: Message = result.unwrap();
+    debug!("[{}] test1 recv: {}", stun_server, test1_response);
     let mut mapped_address = MappedAddress::default();
     let _ = mapped_address.get_from_as(& test1_response, ATTR_MAPPED_ADDRESS);
     let test1_mapped_address = mapped_address;
@@ -245,28 +307,39 @@ pub async fn nat_detect(stun_server: &str) -> IoResult<(String, NatType)> {
         }
     );
 
-    if mut_socket_ref.local_addr()?.ip().eq(&test1_mapped_address.ip) {
+    let local_ip = mut_socket_ref.local_addr()?.ip();
+    let test1_mapped_address_ip = test1_mapped_address.ip;
+    let test1_is_same_ip = local_ip.eq(&test1_mapped_address_ip);
+    debug!("[{}] test1 is_same_ip: l:{} r:{}", stun_server, local_ip, test1_mapped_address_ip);
+    if test1_is_same_ip {
         // no nat
+        debug!("[{}] test2 send: {}", stun_server, test2_message);
         let result = single_send(stun_server, test2_message, mut_socket_ref).await;
-        debug!("[{}] test2: {}", stun_server,result.is_ok());
+        debug!("[{}] test2: {}", stun_server, result.is_ok());
         if result.is_err() {
             return IoResult::Ok((stun_server.to_string(),OpenInternet));
         } else {
+            debug!("[{}] test2 recv: {}", stun_server, result.unwrap());
             return IoResult::Ok((stun_server.to_string(), SymmetricUdpFirewall));
         }
     } else {
         // nat
+        debug!("[{}] test2 send: {}", stun_server, test2_message);
         let result = single_send(stun_server, test2_message, mut_socket_ref).await;
         debug!("[{}] test2: {}", stun_server,result.is_ok());
         if result.is_ok() {
+            let test2_message = result.unwrap();
+            debug!("[{}] test2 recv: {}", stun_server, test2_message);
             return IoResult::Ok((stun_server.to_string(), FullCone));
         } else {
             // test1(2)
             let test1_address = test1_changed_address.to_string();
 
+            let test12_message = build_request_bind_message(transaction_id);
+            debug!("[{}] test12 send: {}", stun_server,test12_message);
             let result = single_send(
                 test1_address.as_str(),
-                build_request_bind_message(transaction_id),
+                test12_message,
                 mut_socket_ref
             ).await;
             debug!("[{}] test12: {}", stun_server,result.is_ok());
@@ -276,6 +349,7 @@ pub async fn nat_detect(stun_server: &str) -> IoResult<(String, NatType)> {
             } else {
                 // Symmetric NAT
                 let test12_response: Message = result.unwrap();
+                debug!("[{}] test12 recv: {}", stun_server, test12_response);
                 let mut mapped_address = MappedAddress::default();
                 let _ = mapped_address.get_from_as(&test12_response, ATTR_MAPPED_ADDRESS);
                 let test12_mapped_address = mapped_address;
@@ -294,6 +368,7 @@ pub async fn nat_detect(stun_server: &str) -> IoResult<(String, NatType)> {
                             length: 4
                         }
                     );
+                    debug!("[{}] test3 send: {}", stun_server, test3_message);
                     let result = single_send(
                         test1_address.as_str(),
                         test3_message,
@@ -303,6 +378,7 @@ pub async fn nat_detect(stun_server: &str) -> IoResult<(String, NatType)> {
                     if result.is_err() {
                         return IoResult::Ok((stun_server.to_string(), RestrictedCone));
                     } else {
+                        debug!("[{}] test3 recv: {}", stun_server, result.unwrap());
                         return IoResult::Ok((stun_server.to_string(), PortRestrictedCone));
                     }
                 }
