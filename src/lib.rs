@@ -296,7 +296,7 @@ pub async fn nat_detect(local_address: SocketAddr,stun_server: &str) -> IoResult
     if result.is_err() {
         return IoResult::Ok((stun_server_string, empty_address(),NatType::UdpBlocked));
     }
-    let test1_response: Message<stun_codec::rfc5389::Attribute> = result.unwrap();
+    let test1_response: Message<stun_codec_blazh::rfc5389::Attribute> = result.unwrap();
     debug!("[{}] test1 recv: {:?}", stun_server, test1_response);
 
     let test1_mapped_address = {
@@ -365,7 +365,7 @@ pub async fn nat_detect(local_address: SocketAddr,stun_server: &str) -> IoResult
                 return IoResult::Ok((stun_server_string,public_address, Unknown));
             } else {
                 // Symmetric NAT
-                let test12_response: Message<stun_codec::rfc5389::Attribute> = result.unwrap();
+                let test12_response: Message<stun_codec_blazh::rfc5389::Attribute> = result.unwrap();
                 debug!("[{}] test12 recv: {:?}", stun_server, test12_response);
 
                 let test12_mapped_address ={
@@ -387,7 +387,7 @@ pub async fn nat_detect(local_address: SocketAddr,stun_server: &str) -> IoResult
                         transaction_id, ChangeRequest::new(false, true)
                     );
                     debug!("[{}] test3 send: {:?}", stun_server, test3_message);
-                    let result = single_send::<ChangeRequest, stun_codec::rfc5389::Attribute>(
+                    let result = single_send::<ChangeRequest, stun_codec_blazh::rfc5389::Attribute>(
                         test1_address.as_str(),
                         test3_message,
                         mut_socket_ref
