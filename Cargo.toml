@@ -1,6 +1,6 @@
 [package]
 name = "nat-detect"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 authors = ["blazh <blazh@163.com>"]
 keywords = ["nat", "stun", "detect"]
@@ -13,8 +13,9 @@ repository = "https://github.com/blazood/nat-detect"
 
 [dependencies]
 tokio = { version = "1.17", features = ["full"] }
-stun = "0.4"
+stun_codec= {version="0.1.13", git="https://github.com/blazood/stun_codec"}
 log = "0.4"
 simple_logger = "2.1"
 clap = { version = "3.1", features = ["derive"] }
 rand = "0.8.5"
+bytecodec = "0.4.15"
