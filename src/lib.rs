@@ -392,10 +392,10 @@ pub async fn nat_detect(local_address: SocketAddr,stun_server: &str) -> IoResult
                     ).await;
                     debug!("[{}] test3: {}", stun_server,result.is_ok());
                     if result.is_err() {
-                        return IoResult::Ok((stun_server_string,public_address, RestrictedCone));
+                        return IoResult::Ok((stun_server_string,public_address, PortRestrictedCone));
                     } else {
                         debug!("[{}] test3 recv: {:?}", stun_server, result.unwrap());
-                        return IoResult::Ok((stun_server_string, public_address,PortRestrictedCone));
+                        return IoResult::Ok((stun_server_string, public_address,RestrictedCone));
                     }
                 }
             }
