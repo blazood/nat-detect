@@ -377,9 +377,7 @@ pub async fn nat_detect(local_address: SocketAddr,stun_server: &str) -> IoResult
                 };
                 debug!("[{}] test12 mapped_address: {}", stun_server,test12_mapped_address);
 
-                if !mut_socket_ref.local_addr()?.ip().eq(&test12_mapped_address.ip())
-                    && mut_socket_ref.local_addr()?.port() ==  test12_mapped_address.port()
-                {
+                if !test1_mapped_address.eq(&test12_mapped_address) {
                     return IoResult::Ok((stun_server_string, public_address,Symmetric));
                 } else {
                     // test 3
