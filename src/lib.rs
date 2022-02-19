@@ -7,11 +7,11 @@ use std::time::Duration;
 
 use log::{debug, info};
 use bytecodec::{DecodeExt, EncodeExt};
-use stun_codec::{Attribute, Message, MessageClass, MessageDecoder, MessageEncoder, TransactionId};
-use stun_codec::rfc3489::attributes::ChangedAddress;
-use stun_codec::rfc5389::attributes::{MappedAddress, UnknownAttributes};
-use stun_codec::rfc5389::methods;
-use stun_codec::rfc5780::attributes::ChangeRequest;
+use stun_codec_blazh::{Attribute, Message, MessageClass, MessageDecoder, MessageEncoder, TransactionId};
+use stun_codec_blazh::rfc3489::attributes::ChangedAddress;
+use stun_codec_blazh::rfc5389::attributes::{MappedAddress, UnknownAttributes};
+use stun_codec_blazh::rfc5389::methods;
+use stun_codec_blazh::rfc5780::attributes::ChangeRequest;
 use crate::NatType::{FullCone, OpenInternet, PortRestrictedCone, RestrictedCone, Symmetric, SymmetricUdpFirewall, Unknown};
 
 
