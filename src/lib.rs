@@ -1,21 +1,24 @@
 use std::collections::HashMap;
-use std::io::{ErrorKind};
+use std::io::ErrorKind;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use tokio::net::UdpSocket;
 use std::time::Duration;
+use tokio::net::UdpSocket;
 
-
-use log::{debug, info};
+use crate::NatType::{
+    FullCone, OpenInternet, PortRestrictedCone, RestrictedCone, Symmetric, SymmetricUdpFirewall,
+    Unknown,
+};
 use bytecodec::{DecodeExt, EncodeExt};
-use stun_codec_blazh::{Attribute, Message, MessageClass, MessageDecoder, MessageEncoder, TransactionId};
+use log::{debug, info};
 use stun_codec_blazh::rfc3489::attributes::ChangedAddress;
 use stun_codec_blazh::rfc5389::attributes::{MappedAddress, UnknownAttributes};
 use stun_codec_blazh::rfc5389::methods;
 use stun_codec_blazh::rfc5780::attributes::ChangeRequest;
-use crate::NatType::{FullCone, OpenInternet, PortRestrictedCone, RestrictedCone, Symmetric, SymmetricUdpFirewall, Unknown};
+use stun_codec_blazh::{
+    Attribute, Message, MessageClass, MessageDecoder, MessageEncoder, TransactionId, RawAttribute,
+};
 
-
-type IoResult<T>= std::io::Result<T>;
+type IoResult<T> = std::io::Result<T>;
 
 // pub(crate) const FAMILY_IPV4: u16 = 0x01;
 // pub(crate) const FAMILY_IPV6: u16 = 0x02;
@@ -27,8 +30,7 @@ pub const TIMEOUT: Duration = Duration::from_millis(1000);
 pub const STUN_RETRY_COUNT: usize = 2;
 
 #[derive(Debug, Eq, PartialEq, Hash, Clone, Copy)]
-pub enum NatType{
-
+pub enum NatType {
     /// UDP is always blocked.
     UdpBlocked,
 
@@ -63,11 +65,11 @@ pub enum NatType{
     Symmetric,
 
     /// Unknown
-    Unknown
+    Unknown,
 }
 
-impl NatType{
-    pub fn weight(&self) -> usize{
+impl NatType {
+    pub fn weight(&self) -> usize {
         match self {
             NatType::UdpBlocked => 1,
             OpenInternet => 7,
@@ -80,7 +82,6 @@ impl NatType{
         }
     }
 }
-
 
 /*
                 In test I, the client sends a STUN Binding Request to a server, without any flags set in the
@@ -135,9 +136,7 @@ impl NatType{
                                               |       Port
                                               +------>Restricted
 */
-pub async fn nat_detect_with_servers(stun_server_list: &[&str]) -> IoResult<(NatType, SocketAddr)>  {
-
-
+pub async fn nat_detect_with_servers(stun_server_list: &[&str]) -> IoResult<(NatType, SocketAddr)> {
     let mut reduce_map: HashMap<NatType, usize> = HashMap::new();
     let mut handlers = Vec::new();
 
@@ -148,7 +147,7 @@ pub async fn nat_detect_with_servers(stun_server_list: &[&str]) -> IoResult<(Nat
         debug!("{} use", s);
         let stun_server = s.to_string();
         let local_address_clone = local_address.clone();
-        handlers.push( tokio::spawn(async move {
+        handlers.push(tokio::spawn(async move {
             nat_detect(local_address_clone, &stun_server).await
         }));
     }
@@ -158,16 +157,19 @@ pub async fn nat_detect_with_servers(stun_server_list: &[&str]) -> IoResult<(Nat
     let empty_address = empty_address();
 
     for h in handlers {
-        let result = h.await.map_err(|_| std::io::Error::from(ErrorKind::Other))?;
-        if let Result::Ok((a, p,n)) = result {
+        let result = h
+            .await
+            .map_err(|_| std::io::Error::from(ErrorKind::Other))?;
+        if let Result::Ok((a, p, n)) = result {
             info!("{} -> {:?}", a, n);
 
             if !empty_address.eq(&p) {
                 public_address = p;
             }
 
-            reduce_map.entry(n.clone())
-                .and_modify(|e| *e  += 1)
+            reduce_map
+                .entry(n.clone())
+                .and_modify(|e| *e += 1)
                 .or_insert(1);
         }
         // else  if let Result::Err(e) = result{
@@ -181,15 +183,22 @@ pub async fn nat_detect_with_servers(stun_server_list: &[&str]) -> IoResult<(Nat
     // }
 
     // select maximum weight
-    if let Option::Some(n) = reduce_map.keys().max_by(|k1, k2| k1.weight().cmp(&k2.weight())){
+    if let Option::Some(n) = reduce_map
+        .keys()
+        .max_by(|k1, k2| k1.weight().cmp(&k2.weight()))
+    {
         return IoResult::Ok((*n, public_address));
     }
 
     return other_error();
 }
 
-fn empty_address() -> SocketAddr{
+fn empty_address() -> SocketAddr {
     SocketAddr::new(IpAddr::V4(Ipv4Addr::from(0)), 0)
+}
+
+fn is_empty_address(socket: SocketAddr) -> bool {
+    socket.ip() == IpAddr::V4(Ipv4Addr::from(0))
 }
 
 // #[derive(Debug)]
@@ -278,9 +287,10 @@ pub async fn local_ip() -> IoResult<SocketAddr> {
 //     }
 // }
 
-
-pub async fn nat_detect(local_address: SocketAddr,stun_server: &str) -> IoResult<(String, SocketAddr, NatType)> {
-
+pub async fn nat_detect(
+    local_address: SocketAddr,
+    stun_server: &str,
+) -> IoResult<(String, SocketAddr, NatType)> {
     let transaction_id = TransactionId::new([3; 12]);
 
     let mut socket = tokio::net::UdpSocket::bind(format!("{}:0", local_address.ip())).await?;
@@ -290,11 +300,270 @@ pub async fn nat_detect(local_address: SocketAddr,stun_server: &str) -> IoResult
 
     // test1
     let test1_message: Message<UnknownAttributes> = build_request_bind_message(transaction_id);
+    let NetworkMappingAddresses {
+        test1_mapped_address,
+        test1_changed_address,
+        public_address,
+    } = udp_blocked_nat_test(stun_server, test1_message, mut_socket_ref).await?;
+
+    if is_empty_address(test1_mapped_address) {
+        return IoResult::Ok((
+            stun_server_string,
+            test1_mapped_address,
+            NatType::UdpBlocked,
+        ));
+    }
+
+    // test2
+    let test2_message =
+        build_request_bind_message_with_attribute(transaction_id, ChangeRequest::new(true, true));
+
+    if test1_is_same_ip(
+        &(mut_socket_ref.local_addr()?),
+        &test1_mapped_address.ip(),
+        stun_server,
+    ) {
+        // no nat
+        debug!("[{}] test2 send: {:?}", stun_server, test2_message);
+        let result =
+            single_send::<ChangeRequest, MappedAddress>(stun_server, test2_message, mut_socket_ref)
+                .await;
+        debug!("[{}] test2: {}", stun_server, result.is_ok());
+        if result.is_err() {
+            IoResult::Ok((stun_server_string, public_address, OpenInternet))
+        } else {
+            debug!("[{}] test2 recv: {:?}", stun_server, result.unwrap());
+            IoResult::Ok((stun_server_string, public_address, SymmetricUdpFirewall))
+        }
+    } else {
+        // nat
+        debug!("[{}] test2 send: {:?}", stun_server, test2_message);
+        let result =
+            single_send::<ChangeRequest, MappedAddress>(stun_server, test2_message, mut_socket_ref)
+                .await;
+        debug!("[{}] test2: {}", stun_server, result.is_ok());
+        if result.is_ok() {
+            let test2_message = result.unwrap();
+            debug!("[{}] test2 recv: {:?}", stun_server, test2_message);
+            IoResult::Ok((stun_server_string, public_address, FullCone))
+        } else {
+            // test1(2)
+            let test1_address = test1_changed_address.to_string();
+
+            let test12_message: Message<UnknownAttributes> =
+                build_request_bind_message(transaction_id);
+            let result = unknown_nat_test(
+                stun_server,
+                test12_message,
+                test1_address.as_str(),
+                mut_socket_ref,
+            )
+            .await;
+            if result.is_err() {
+                IoResult::Ok((stun_server_string, public_address, Unknown))
+            } else {
+                // Symmetric NAT
+                if symmetric_nat_test(result?, stun_server, test1_mapped_address).await? {
+                    IoResult::Ok((stun_server_string, public_address, Symmetric))
+                } else {
+                    // test 3
+                    let test3_message = build_request_bind_message_with_attribute(
+                        transaction_id,
+                        ChangeRequest::new(false, true),
+                    );
+                    let result = port_restricted_or_restricted_cone_test(
+                        stun_server,
+                        test1_address.as_str(),
+                        mut_socket_ref,
+                        test3_message,
+                    )
+                    .await;
+                    if result.is_err() {
+                        IoResult::Ok((stun_server_string, public_address, PortRestrictedCone))
+                    } else {
+                        debug!("[{}] test3 recv: {:?}", stun_server, result.unwrap());
+                        IoResult::Ok((stun_server_string, public_address, RestrictedCone))
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn other_error<A>() -> IoResult<A> {
+    IoResult::Err(std::io::Error::from(ErrorKind::Other))
+}
+
+fn build_request_bind_message<A: Attribute>(transaction_id: TransactionId) -> Message<A> {
+    Message::new(MessageClass::Request, methods::BINDING, transaction_id)
+}
+
+fn build_request_bind_message_with_attribute<A: Attribute>(
+    transaction_id: TransactionId,
+    a: A,
+) -> Message<A> {
+    let mut message = build_request_bind_message(transaction_id);
+    message.add_attribute(a);
+    message
+}
+
+pub async fn nat_detect_with_attributes(
+    local_address: SocketAddr,
+    stun_server: &str,
+    attributes: Vec<RawAttribute>,
+) -> IoResult<(String, SocketAddr, NatType)> {
+    let transaction_id = TransactionId::new([3; 12]);
+
+    let mut socket = tokio::net::UdpSocket::bind(format!("{}:0", local_address.ip())).await?;
+    let mut_socket_ref = &mut socket;
+
+    let stun_server_string = stun_server.to_string();
+
+    // test1
+    let test1_message: Message<RawAttribute> =
+        build_request_bind_message_with_raw_attributes(transaction_id, &attributes);
+    let NetworkMappingAddresses {
+        test1_mapped_address,
+        test1_changed_address,
+        public_address,
+    } = udp_blocked_nat_test(stun_server, test1_message, mut_socket_ref).await?;
+
+    if is_empty_address(test1_mapped_address) {
+        return IoResult::Ok((
+            stun_server_string,
+            test1_mapped_address,
+            NatType::UdpBlocked,
+        ));
+    }
+
+    // test2
+    let test2_message = build_request_bind_message_with_raw_attributes(
+        transaction_id,
+        insert_change_request_attribute(&mut attributes.clone(), ChangeRequest::new(true, true)),
+    );
+
+    if test1_is_same_ip(
+        &(mut_socket_ref.local_addr()?),
+        &test1_mapped_address.ip(),
+        stun_server,
+    ) {
+        // no nat
+        debug!("[{}] test2 send: {:?}", stun_server, test2_message);
+        let result =
+            single_send::<RawAttribute, MappedAddress>(stun_server, test2_message, mut_socket_ref)
+                .await;
+        debug!("[{}] test2: {}", stun_server, result.is_ok());
+        if result.is_err() {
+            IoResult::Ok((stun_server_string, public_address, OpenInternet))
+        } else {
+            debug!("[{}] test2 recv: {:?}", stun_server, result.unwrap());
+            IoResult::Ok((stun_server_string, public_address, SymmetricUdpFirewall))
+        }
+    } else {
+        // nat
+        debug!("[{}] test2 send: {:?}", stun_server, test2_message);
+        let result =
+            single_send::<RawAttribute, MappedAddress>(stun_server, test2_message, mut_socket_ref)
+                .await;
+        debug!("[{}] test2: {}", stun_server, result.is_ok());
+        if result.is_ok() {
+            let test2_message = result.unwrap();
+            debug!("[{}] test2 recv: {:?}", stun_server, test2_message);
+            IoResult::Ok((stun_server_string, public_address, FullCone))
+        } else {
+            // test1(2)
+            let test1_address = test1_changed_address.to_string();
+
+            let test12_message: Message<RawAttribute> =
+                build_request_bind_message_with_raw_attributes(transaction_id, &attributes);
+            let result = unknown_nat_test(
+                stun_server,
+                test12_message,
+                test1_address.as_str(),
+                mut_socket_ref,
+            )
+            .await;
+            if result.is_err() {
+                IoResult::Ok((stun_server_string, public_address, Unknown))
+            } else {
+                // Symmetric NAT
+                if symmetric_nat_test(result?, stun_server, test1_mapped_address).await? {
+                    IoResult::Ok((stun_server_string, public_address, Symmetric))
+                } else {
+                    // test 3
+                    let test3_message = build_request_bind_message_with_raw_attributes(
+                        transaction_id,
+                        insert_change_request_attribute(
+                            &mut attributes.clone(),
+                            ChangeRequest::new(true, true),
+                        ),
+                    );
+                    let result = port_restricted_or_restricted_cone_test(
+                        stun_server,
+                        test1_address.as_str(),
+                        mut_socket_ref,
+                        test3_message,
+                    )
+                    .await;
+                    if result.is_err() {
+                        IoResult::Ok((stun_server_string, public_address, PortRestrictedCone))
+                    } else {
+                        debug!("[{}] test3 recv: {:?}", stun_server, result.unwrap());
+                        IoResult::Ok((stun_server_string, public_address, RestrictedCone))
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn build_request_bind_message_with_raw_attributes(
+    transaction_id: TransactionId,
+    a: &Vec<RawAttribute>,
+) -> Message<RawAttribute> {
+    let mut message = build_request_bind_message(transaction_id);
+    for attr in a {
+        message.add_raw_attribute((*attr).clone());
+    }
+    message
+}
+
+struct NetworkMappingAddresses {
+    test1_changed_address: SocketAddr,
+    public_address: SocketAddr,
+    test1_mapped_address: SocketAddr,
+}
+
+fn insert_change_request_attribute(
+    attributes: &mut Vec<RawAttribute>,
+    change_request_attr: ChangeRequest,
+) -> &Vec<RawAttribute> {
+    let ip_bit = (change_request_attr.ip() as u8) << 1;
+    let port_bit = change_request_attr.port() as u8;
+    let change_attr_val = vec![0, 0, 0, (ip_bit | port_bit) << 1];
+
+    attributes.push(RawAttribute::new(
+        change_request_attr.get_type(),
+        change_attr_val,
+    ));
+
+    attributes
+}
+
+async fn udp_blocked_nat_test<A: Attribute + std::fmt::Debug>(
+    stun_server: &str,
+    test1_message: Message<A>,
+    mut_socket_ref: &mut UdpSocket,
+) -> IoResult<NetworkMappingAddresses> {
     debug!("[{}] test1 send: {:?}", stun_server, test1_message);
     let result = single_send(stun_server, test1_message, mut_socket_ref).await;
     debug!("[{}] test1: {}", stun_server, result.is_ok());
     if result.is_err() {
-        return IoResult::Ok((stun_server_string, empty_address(),NatType::UdpBlocked));
+        return IoResult::Ok(NetworkMappingAddresses {
+            test1_changed_address: empty_address(),
+            public_address: empty_address(),
+            test1_mapped_address: empty_address(),
+        });
     }
     let test1_response: Message<stun_codec_blazh::rfc5389::Attribute> = result.unwrap();
     debug!("[{}] test1 recv: {:?}", stun_server, test1_response);
@@ -303,126 +572,104 @@ pub async fn nat_detect(local_address: SocketAddr,stun_server: &str) -> IoResult
         let opt: Option<&MappedAddress> = test1_response.get_attribute();
         match opt {
             None => return other_error(),
-            Some(a) => a.address()
+            Some(a) => a.address(),
         }
     };
-    debug!("[{}] test1 mapped_address: {}", stun_server,test1_mapped_address);
+    debug!(
+        "[{}] test1 mapped_address: {}",
+        stun_server, test1_mapped_address
+    );
 
-    let public_address = SocketAddr::new(test1_mapped_address.ip().clone(), test1_mapped_address.port().clone());
+    let public_address = SocketAddr::new(
+        test1_mapped_address.ip().clone(),
+        test1_mapped_address.port().clone(),
+    );
 
-    let test1_changed_address ={
+    let test1_changed_address = {
         let opt: Option<&ChangedAddress> = test1_response.get_attribute();
         match opt {
             None => return other_error(),
-            Some(a) => a.address()
+            Some(a) => a.address(),
         }
     };
-    debug!("[{}] test1 changed_address: {}", stun_server,test1_changed_address);
-
-
-    // test2
-    let test2_message = build_request_bind_message_with_attribute(
-        transaction_id, ChangeRequest::new(true, true)
+    debug!(
+        "[{}] test1 changed_address: {}",
+        stun_server, test1_changed_address
     );
 
-    let local_ip = mut_socket_ref.local_addr()?.ip();
-    let test1_mapped_address_ip = test1_mapped_address.ip();
-    let test1_is_same_ip = local_ip.eq(&test1_mapped_address_ip);
-    debug!("[{}] test1 is_same_ip: l:{} r:{}", stun_server, local_ip, test1_mapped_address_ip);
-    if test1_is_same_ip {
-        // no nat
-        debug!("[{}] test2 send: {:?}", stun_server, test2_message);
-        let result = single_send::<ChangeRequest, MappedAddress>(stun_server, test2_message, mut_socket_ref).await;
-        debug!("[{}] test2: {}", stun_server, result.is_ok());
-        if result.is_err() {
-            return IoResult::Ok((stun_server_string, public_address,OpenInternet));
-        } else {
-            debug!("[{}] test2 recv: {:?}", stun_server, result.unwrap());
-            return IoResult::Ok((stun_server_string, public_address, SymmetricUdpFirewall));
+    Ok(NetworkMappingAddresses {
+        test1_changed_address,
+        public_address,
+        test1_mapped_address,
+    })
+}
+
+async fn symmetric_nat_test(
+    test12_response: Message<stun_codec_blazh::rfc5389::Attribute>,
+    stun_server: &str,
+    test1_mapped_address: SocketAddr,
+) -> Result<bool, std::io::Error> {
+    debug!("[{}] test12 recv: {:?}", stun_server, test12_response);
+
+    let test12_mapped_address = {
+        let opt: Option<&MappedAddress> = test12_response.get_attribute();
+        match opt {
+            None => return other_error(),
+            Some(a) => a.address(),
         }
+    };
+    debug!(
+        "[{}] test12 mapped_address: {}",
+        stun_server, test12_mapped_address
+    );
+
+    if !test1_mapped_address.eq(&test12_mapped_address) {
+        Ok(true)
     } else {
-        // nat
-        debug!("[{}] test2 send: {:?}", stun_server, test2_message);
-        let result = single_send::<ChangeRequest, MappedAddress>(stun_server, test2_message, mut_socket_ref).await;
-        debug!("[{}] test2: {}", stun_server,result.is_ok());
-        if result.is_ok() {
-            let test2_message = result.unwrap();
-            debug!("[{}] test2 recv: {:?}", stun_server, test2_message);
-            return IoResult::Ok((stun_server_string, public_address, FullCone));
-        } else {
-            // test1(2)
-            let test1_address = test1_changed_address.to_string();
-
-            let test12_message: Message<UnknownAttributes> = build_request_bind_message(transaction_id);
-            debug!("[{}] test12 send: {:?}", stun_server,test12_message);
-            let result = single_send(
-                test1_address.as_str(),
-                test12_message,
-                mut_socket_ref
-            ).await;
-            debug!("[{}] test12: {}", stun_server,result.is_ok());
-            if result.is_err() {
-                return IoResult::Ok((stun_server_string,public_address, Unknown));
-            } else {
-                // Symmetric NAT
-                let test12_response: Message<stun_codec_blazh::rfc5389::Attribute> = result.unwrap();
-                debug!("[{}] test12 recv: {:?}", stun_server, test12_response);
-
-                let test12_mapped_address ={
-                    let opt: Option<&MappedAddress> = test12_response.get_attribute();
-                    match opt {
-                        None => return other_error(),
-                        Some(a) => a.address()
-                    }
-                };
-                debug!("[{}] test12 mapped_address: {}", stun_server,test12_mapped_address);
-
-                if !test1_mapped_address.eq(&test12_mapped_address) {
-                    return IoResult::Ok((stun_server_string, public_address,Symmetric));
-                } else {
-                    // test 3
-                    let test3_message = build_request_bind_message_with_attribute(
-                        transaction_id, ChangeRequest::new(false, true)
-                    );
-                    debug!("[{}] test3 send: {:?}", stun_server, test3_message);
-                    let result = single_send::<ChangeRequest, stun_codec_blazh::rfc5389::Attribute>(
-                        test1_address.as_str(),
-                        test3_message,
-                        mut_socket_ref
-                    ).await;
-                    debug!("[{}] test3: {}", stun_server,result.is_ok());
-                    if result.is_err() {
-                        return IoResult::Ok((stun_server_string,public_address, PortRestrictedCone));
-                    } else {
-                        debug!("[{}] test3 recv: {:?}", stun_server, result.unwrap());
-                        return IoResult::Ok((stun_server_string, public_address,RestrictedCone));
-                    }
-                }
-            }
-        }
+        Ok(false)
     }
-
-
 }
 
-fn other_error<A>() -> IoResult<A> {
-    IoResult::Err(std::io::Error::from(ErrorKind::Other))
+async fn unknown_nat_test<A: Attribute + std::fmt::Debug>(
+    stun_server: &str,
+    test12_message: Message<A>,
+    test1_address: &str,
+    mut_socket_ref: &mut UdpSocket,
+) -> Result<Message<stun_codec_blazh::rfc5389::Attribute>, std::io::Error> {
+    debug!("[{}] test12 send: {:?}", stun_server, test12_message);
+    let result = single_send(test1_address, test12_message, mut_socket_ref).await;
+    debug!("[{}] test12: {}", stun_server, result.is_ok());
+    result
 }
 
-fn build_request_bind_message<A: Attribute>(transaction_id: TransactionId) -> Message<A> {
-    return  Message::new(
-        MessageClass::Request,
-        methods::BINDING,
-        transaction_id
+async fn port_restricted_or_restricted_cone_test<A: Attribute + std::fmt::Debug>(
+    stun_server: &str,
+    test1_address: &str,
+    mut_socket_ref: &mut UdpSocket,
+    test3_message: Message<A>,
+) -> Result<Message<stun_codec_blazh::rfc5389::Attribute>, std::io::Error> {
+    debug!("[{}] test3 send: {:?}", stun_server, test3_message);
+    let result = single_send::<A, stun_codec_blazh::rfc5389::Attribute>(
+        test1_address,
+        test3_message,
+        mut_socket_ref,
+    )
+    .await;
+    debug!("[{}] test3: {}", stun_server, result.is_ok());
+    result
+}
+
+fn test1_is_same_ip(
+    mut_socket_ref: &SocketAddr,
+    test1_mapped_address_ip: &IpAddr,
+    stun_server: &str,
+) -> bool {
+    let local_ip = mut_socket_ref.ip();
+    debug!(
+        "[{}] test1 is_same_ip: l:{} r:{}",
+        stun_server, local_ip, *test1_mapped_address_ip
     );
-}
-
-fn build_request_bind_message_with_attribute<A: Attribute>(
-    transaction_id: TransactionId, a: A
-) -> Message<A> {
-    let mut message = build_request_bind_message(transaction_id);
-    message.add_attribute(a);
-    message
+    local_ip.eq(test1_mapped_address_ip)
 }
 
 // pub struct StunResult{
@@ -440,44 +687,70 @@ fn build_request_bind_message_with_attribute<A: Attribute>(
 async fn single_send<A: Attribute, B: Attribute>(
     stun_server: &str,
     message: Message<A>,
-    socket: & mut UdpSocket
-)
-    -> IoResult<Message<B>>
-{
+    socket: &mut UdpSocket,
+) -> IoResult<Message<B>> {
     let mut encoder = MessageEncoder::default();
-    let bytes: Vec<u8> = encoder.encode_into_bytes(message.clone()).map_err(|_e| std::io::Error::from(ErrorKind::Other))?;
+    let bytes: Vec<u8> = encoder
+        .encode_into_bytes(message.clone())
+        .map_err(|_e| std::io::Error::from(ErrorKind::Other))?;
     let mut buf = [0; 1 << 9];
     for _i in 0..STUN_RETRY_COUNT {
         match tokio::time::timeout(TIMEOUT, socket.send_to(bytes.as_slice(), stun_server)).await {
             Ok(Ok(_)) => {}
-            _ => {
-                continue
-            }
+            _ => continue,
         }
         let len = {
-            match tokio::time::timeout(TIMEOUT, socket.recv_from(&mut buf)) .await {
+            match tokio::time::timeout(TIMEOUT, socket.recv_from(&mut buf)).await {
                 Ok(Ok((i, _))) => i,
-                _ => {
-                    continue
-                }
+                _ => continue,
             }
         };
 
         let mut decoder = MessageDecoder::<B>::new();
         match decoder.decode_from_bytes(&buf[0..len]) {
             Ok(Ok(m)) => {
-                if m.class()== MessageClass::ErrorResponse {
-                    break
+                if m.class() == MessageClass::ErrorResponse {
+                    break;
                 }
                 if message.transaction_id().eq(&m.transaction_id()) {
                     return IoResult::Ok(m);
                 }
             }
-            _ => {
-                continue
-            }
+            _ => continue,
         };
     }
     return IoResult::Err(std::io::Error::from(ErrorKind::Other));
 }
 
+#[cfg(test)]
+mod test {
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    use stun_codec_blazh::{rfc5389::attributes::Software, Attribute, RawAttribute};
+
+    use crate::{nat_detect, nat_detect_with_attributes};
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    pub async fn test_nat_detection_with_fields() {
+        let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
+        let stun_ip: [u8; 4] = [216, 93, 246, 18];
+        let nat_detection = Box::pin(nat_detect(
+            address,
+            &SocketAddr::from((stun_ip, 3478)).to_string(),
+        ))
+        .await;
+
+        let software_attr = Software::new("Vovida.\0".to_string()).unwrap();
+        let nat_detection_w_attr = Box::pin(nat_detect_with_attributes(
+            address,
+            &SocketAddr::from((stun_ip, 3478)).to_string(),
+            vec![RawAttribute::new(
+                software_attr.get_type(),
+                software_attr.description().as_bytes().to_vec(),
+            )],
+        ))
+        .await;
+
+        assert_eq!(nat_detection.unwrap().2, nat_detection_w_attr.unwrap().2);
+    }
+}
