@@ -13,7 +13,7 @@ repository = "https://github.com/blazood/nat-detect"
 
 [dependencies]
 tokio = { version = "1.17", features = ["full"] }
-stun_codec_blazh= {version="0.1.13"}
+stun_codec_blazh= { git = "https://github.com/NordSecurity/stun_codec.git", branch = "hasan/add-raw-attributes" }
 log = "0.4"
 simple_logger = "2.1"
 clap = { version = "3.1", features = ["derive"] }
